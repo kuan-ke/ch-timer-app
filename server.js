@@ -75,7 +75,7 @@ const BOSS_PRESETS = [
 
 function createChannel() {
   return {
-    state: 'idle',      // idle | counting | appearing
+    state: 'idle',      // idle | counting（倒數中）| window（重生區間：最小值～最大值）| appearing（出現中：超過最大值）
     startTime: null,    // server epoch ms
     customMin: null,    // null = 使用分頁預設值
     customMax: null,
@@ -118,6 +118,8 @@ function createRoom(id, password) {
     activityLog: [],
     // 隊長：建立房間的人（以瀏覽器識別碼記住，重新整理、斷線重連後仍是隊長）
     captainClientId: null,
+    captainName: null,           // 隊長目前的暱稱（隊長不在房間時也會顯示）
+    captainMuted: new Map(),     // 被隊長禁止操作的隊員（小寫暱稱 -> 原始暱稱）
     lastActive: Date.now()
   };
 }
@@ -245,7 +247,41 @@ function scheduleAdminRooms() {
 }
 
 function isMuted(room, socket) {
-  return room.mutedNicknames.has(normalizeName(socket.data.nickname));
+  const n = normalizeName(socket.data.nickname);
+  return room.mutedNicknames.has(n) || room.captainMuted.has(n);
+}
+
+// 依經過時間決定 CH 狀態：最小值前「倒數中」→ 最小值～最大值「重生區間」→ 超過最大值「出現中」
+function stateFor(elapsed, minMs, maxMs) {
+  if (elapsed < minMs) return 'counting';
+  if (elapsed < maxMs) return 'window';
+  return 'appearing';
+}
+const STATE_ORDER = { idle: 0, counting: 1, window: 2, appearing: 3 };
+
+// 改名時，把「禁止操作」與「隊長名稱」一起轉移到新名字
+function transferNameState(room, targetClientId, oldName, newName) {
+  const o = normalizeName(oldName);
+  const n = normalizeName(newName);
+  for (const map of [room.mutedNicknames, room.captainMuted]) {
+    if (map.has(o)) { map.delete(o); map.set(n, newName); }
+  }
+  broadcastAdminMutedList(room);
+  if (room.captainClientId && targetClientId === room.captainClientId) room.captainName = newName;
+  broadcastRoomInfo(room);
+}
+
+// 房間資訊（隊長名稱）給房間內所有人
+function broadcastRoomInfo(room) {
+  io.to(room.id).emit('room:info', { captainName: room.captainName });
+}
+
+// 隊長看到的「被隊長禁止操作」名單
+function sendCaptainMuted(room) {
+  const list = Array.from(room.captainMuted.values());
+  for (const [, s] of io.sockets.sockets) {
+    if (s.data.roomId === room.id && isCaptain(room, s)) s.emit('captain:muted', list);
+  }
 }
 
 // 被禁止的人嘗試任何操作時，直接擋下並通知他
@@ -312,10 +348,14 @@ function tick() {
           ch.startTime = null;
           ch.startedBy = null;
           changed = true;
-        } else if (elapsed >= minMs && ch.state !== 'appearing') {
-          ch.state = 'appearing';
-          changed = true;
-          io.to(room.id).emit('channelAlert', { tabId: tab.id, channelIndex: idx });
+        } else {
+          const target = stateFor(elapsed, minMs, maxMs);
+          if (STATE_ORDER[target] > STATE_ORDER[ch.state]) {
+            ch.state = target;
+            changed = true;
+            // 進入重生區間、進入出現中都會提醒
+            io.to(room.id).emit('channelAlert', { tabId: tab.id, channelIndex: idx, kind: target });
+          }
         }
       });
     }
@@ -400,12 +440,40 @@ io.on('connection', (socket) => {
     if (!room.captainClientId && !socket.data.isAdmin && socket.data.clientId) {
       room.captainClientId = socket.data.clientId;
     }
+    if (isCaptain(room, socket)) room.captainName = trimmedName; // 隊長回來時以目前暱稱更新
 
     socket.emit('join:ack', { nickname: trimmedName, created, captain: isCaptain(room, socket) });
     socket.emit('state:init', { tabs: room.tabs, serverTime: Date.now() });
     socket.emit('log:init', room.activityLog);
     if (socket.data.isAdmin) socket.emit('admin:mutedList', Array.from(room.mutedNicknames.values()));
+    if (isCaptain(room, socket)) socket.emit('captain:muted', Array.from(room.captainMuted.values()));
+    broadcastRoomInfo(room);
     broadcastUsers(room);
+  });
+
+  // ---------- 隊長：禁止 / 解除禁止隊員操作（只限這間房間，以暱稱判斷，離線再回來仍有效） ----------
+  socket.on('captainMute', ({ nickname } = {}) => {
+    const room = getRoom(socket);
+    if (!room || !isCaptain(room, socket) || typeof nickname !== 'string' || !nickname.trim()) return;
+    const n = normalizeName(nickname);
+    if (n === normalizeName(socket.data.nickname)) return; // 不能禁止自己
+    // 只能禁止目前在房間裡的隊員（不含隱身的管理者）
+    const member = roomUserList(room).find((u) => !u.hidden && normalizeName(u.name) === n);
+    if (!member) return;
+    room.captainMuted.set(n, member.name);
+    sendCaptainMuted(room);
+    addLog(room, `隊長「${socket.data.nickname}」禁止「${member.name}」進行操作`, 'admin');
+  });
+
+  socket.on('captainUnmute', ({ nickname } = {}) => {
+    const room = getRoom(socket);
+    if (!room || !isCaptain(room, socket) || typeof nickname !== 'string') return;
+    const n = normalizeName(nickname);
+    const original = room.captainMuted.get(n);
+    if (!original) return;
+    room.captainMuted.delete(n);
+    sendCaptainMuted(room);
+    addLog(room, `隊長「${socket.data.nickname}」解除了「${original}」的操作禁止`, 'admin');
   });
 
   // 產生一組隨機房間密碼（符合規則，且不會跟目前已存在的房間重複）
@@ -443,16 +511,13 @@ io.on('connection', (socket) => {
       socket.emit('error:toast', '這個暱稱在此房間已經有人在使用');
       return;
     }
-    if (room.mutedNicknames.has(normalizeName(oldName))) { // 被禁止的人改名後仍維持禁止
-      room.mutedNicknames.delete(normalizeName(oldName));
-      room.mutedNicknames.set(normalizeName(trimmed), trimmed);
-      broadcastAdminMutedList(room);
-    }
     targets.forEach((t) => {
       t.data.nickname = trimmed;
       room.connectedUsers.set(t.id, trimmed);
       t.emit('forceNickname', trimmed);
     });
+    transferNameState(room, target.data.clientId, oldName, trimmed); // 被禁止的人改名後仍維持禁止；隊長改名同步更新隊長名稱
+    sendCaptainMuted(room);
     broadcastUsers(room);
     const self = target.data.clientId === socket.data.clientId;
     addLog(room, self
@@ -497,16 +562,13 @@ io.on('connection', (socket) => {
     if (targets.length === 0) return;
 
     const oldName = targets[0].data.nickname;
-    if (room.mutedNicknames.has(normalizeName(oldName))) { // 被禁止的人改名後仍維持禁止
-      room.mutedNicknames.delete(normalizeName(oldName));
-      room.mutedNicknames.set(normalizeName(trimmed), trimmed);
-      broadcastAdminMutedList(room);
-    }
     targets.forEach((t) => {
       t.data.nickname = trimmed;
       room.connectedUsers.set(t.id, trimmed);
       t.emit('forceNickname', trimmed);
     });
+    transferNameState(room, targets[0].data.clientId, oldName, trimmed);
+    sendCaptainMuted(room);
     broadcastUsers(room);
     addLog(room, `管理者將「${oldName}」的暱稱改為「${trimmed}」`, 'admin');
   });
@@ -732,7 +794,7 @@ io.on('connection', (socket) => {
     ch.customMin = null;
     ch.customMax = null;
     ch.startTime = spawnMs - tab.minMinutes * 60000;
-    ch.state = spawnMs <= now ? 'appearing' : 'counting';
+    ch.state = stateFor(now - ch.startTime, tab.minMinutes * 60000, tab.maxMinutes * 60000);
     ch.startedBy = nickname;
 
     const label = typeof spawnTimeLabel === 'string' ? spawnTimeLabel.slice(0, 20) : '';
