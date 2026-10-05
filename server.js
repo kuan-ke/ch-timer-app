@@ -14,6 +14,7 @@ const APPEAR_HOLD_MS = 10 * 60 * 1000; // 超過最大值後，「出現中」�
 const MAX_LOG = 500; // 每個房間的操作紀錄最多保留筆數（避免伺服器記憶體無限成長）
 // 房間密碼規則：剛好 6 個字元，只能是英文大小寫或數字（大小寫視為不同）
 const PASSWORD_RE = /^[A-Za-z0-9]{6}$/;
+const MAX_ROOM_USERS = 10; // 每間房間最多幾個人（同一個瀏覽器開多個分頁只算一人；管理者不計入）
 // 房間沒有任何人在線、也沒有任何進行中的 CH 超過這段時間，就自動刪除（釋放記憶體）
 const EMPTY_ROOM_TTL_MS = 6 * 60 * 60 * 1000;
 
@@ -115,6 +116,8 @@ function createRoom(id, password) {
     bannedNicknames: new Set(), // 已被管理者移除、不可再進入此房間的暱稱（小寫）
     mutedNicknames: new Map(),  // 被禁止操作的使用者（小寫暱稱 -> 原始暱稱）
     activityLog: [],
+    // 隊長：建立房間的人（以瀏覽器識別碼記住，重新整理、斷線重連後仍是隊長）
+    captainClientId: null,
     lastActive: Date.now()
   };
 }
@@ -172,6 +175,15 @@ function roomUserList(room) {
   return Array.from(seen.values());
 }
 
+function isCaptain(room, socket) {
+  return !!room.captainClientId && !socket.data.isAdmin && socket.data.clientId === room.captainClientId;
+}
+
+// 房間目前「看得見的人數」（同一瀏覽器同暱稱只算一人，管理者不計入）
+function visibleUserCount(room) {
+  return roomUserList(room).filter((u) => !u.hidden).length;
+}
+
 // 跟 targetSocketId 同一個瀏覽器、同一個身分（一般 / 管理者）、在同一個房間的所有連線
 // （管理者對一般使用者改名、移除時，不會波及同一個瀏覽器裡的管理者分頁）
 function sameClientSocketsInRoom(room, targetSocketId) {
@@ -193,7 +205,9 @@ function broadcastState(room) {
 
 function broadcastUsers(room) {
   // 所有人（包含管理者自己）收到的都是同一份「看得見的人」名單，資料裡不會出現隱身相關的欄位
-  const visible = roomUserList(room).filter((u) => !u.hidden).map(({ id, name }) => ({ id, name }));
+  const visible = roomUserList(room)
+    .filter((u) => !u.hidden)
+    .map(({ id, name }) => ({ id, name, captain: !!room.captainClientId && clientIdOf(id) === room.captainClientId }));
   io.to(room.id).emit('users:update', visible);
   scheduleAdminRooms();
 }
@@ -357,6 +371,16 @@ io.on('connection', (socket) => {
         socket.emit('join:error', { field: 'nickname', code: 'taken', message: '這個暱稱在此房間已經有人在使用，請換一個' });
         return;
       }
+      // 人數上限：管理者不受限制；已經在房間裡的同一個人（同瀏覽器、同暱稱，例如重新整理）也不會被擋
+      if (!socket.data.isAdmin) {
+        const alreadyIn = roomUserList(existing).some(
+          (u) => !u.hidden && socket.data.clientId && clientIdOf(u.id) === socket.data.clientId && normalizeName(u.name) === normalizeName(trimmedName)
+        );
+        if (!alreadyIn && visibleUserCount(existing) >= MAX_ROOM_USERS) {
+          socket.emit('join:error', { field: 'password', code: 'full', message: `這個房間已滿（最多 ${MAX_ROOM_USERS} 人），請稍後再試或換一個房間` });
+          return;
+        }
+      }
     }
 
     // 如果原本在別的房間，先離開
@@ -372,7 +396,12 @@ io.on('connection', (socket) => {
     room.connectedUsers.set(socket.id, trimmedName);
     room.lastActive = Date.now();
 
-    socket.emit('join:ack', { nickname: trimmedName, created });
+    // 建立房間的人成為隊長（管理者隱身不當隊長；由管理者建立的房間，第一個進來的一般使用者成為隊長）
+    if (!room.captainClientId && !socket.data.isAdmin && socket.data.clientId) {
+      room.captainClientId = socket.data.clientId;
+    }
+
+    socket.emit('join:ack', { nickname: trimmedName, created, captain: isCaptain(room, socket) });
     socket.emit('state:init', { tabs: room.tabs, serverTime: Date.now() });
     socket.emit('log:init', room.activityLog);
     if (socket.data.isAdmin) socket.emit('admin:mutedList', Array.from(room.mutedNicknames.values()));
@@ -393,6 +422,42 @@ io.on('connection', (socket) => {
 
   socket.on('leaveRoom', () => {
     leaveCurrentRoom(socket);
+  });
+
+  // ---------- 隊長：修改自己或同房間其他人在此房間的暱稱 ----------
+  socket.on('captainRename', ({ targetSocketId, newName } = {}) => {
+    const room = getRoom(socket);
+    if (!room || !isCaptain(room, socket)) return;
+    const trimmed = (typeof newName === 'string' ? newName : '').trim().slice(0, 20);
+    if (!trimmed) return;
+    const targets = sameClientSocketsInRoom(room, targetSocketId).filter((t) => !t.data.isAdmin);
+    if (targets.length === 0) return;
+    const target = targets[0];
+    const oldName = target.data.nickname;
+    if (normalizeName(oldName) === normalizeName(trimmed) && oldName === trimmed) return;
+    if (room.bannedNicknames.has(normalizeName(trimmed))) {
+      socket.emit('error:toast', '這個暱稱已被移出此房間，不能使用');
+      return;
+    }
+    if (isNicknameTaken(room, trimmed, target.id, false, target.data.clientId)) {
+      socket.emit('error:toast', '這個暱稱在此房間已經有人在使用');
+      return;
+    }
+    if (room.mutedNicknames.has(normalizeName(oldName))) { // 被禁止的人改名後仍維持禁止
+      room.mutedNicknames.delete(normalizeName(oldName));
+      room.mutedNicknames.set(normalizeName(trimmed), trimmed);
+      broadcastAdminMutedList(room);
+    }
+    targets.forEach((t) => {
+      t.data.nickname = trimmed;
+      room.connectedUsers.set(t.id, trimmed);
+      t.emit('forceNickname', trimmed);
+    });
+    broadcastUsers(room);
+    const self = target.data.clientId === socket.data.clientId;
+    addLog(room, self
+      ? `隊長「${oldName}」將自己的暱稱改為「${trimmed}」`
+      : `隊長「${socket.data.nickname}」將「${oldName}」的暱稱改為「${trimmed}」`, 'admin');
   });
 
   // 只用於管理者修改自己的暱稱（一般使用者暱稱設定後無法自行更改）
