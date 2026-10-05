@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>巡王計時器</title>
+<title>楓之谷｜團隊野王計時器</title>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -11,7 +11,7 @@
 
   <header class="top-bar">
     <div class="top-bar-left">
-      <h1>巡王計時器</h1>
+      <h1>楓之谷｜團隊野王計時器</h1>
       <div id="onlineUsersBar" class="online-users-bar">
         <span class="online-label">🟢 線上 <span id="onlineCount">0</span> 人：</span>
         <span id="onlineNames" class="online-names"></span>
@@ -41,7 +41,7 @@
         <div class="range-panel">
           <label>最小值(分)<input type="number" id="minInput" min="1" /></label>
           <label>最大值(分)<input type="number" id="maxInput" min="1" /></label>
-          <span class="range-hint" id="rangeHint">右鍵輸入死亡時間或中鍵輸入重生時間</span>
+          <span class="range-hint" id="rangeHint">右鍵輸入死亡時間 或 中鍵輸入重生時間</span>
         </div>
         <div class="legend">
           <span class="legend-item"><span class="dot idle"></span>待機</span>
@@ -104,7 +104,7 @@
       <button type="button" id="togglePasswordBtn" class="btn-secondary password-toggle" title="顯示 / 隱藏密碼">顯示</button>
       <button type="button" id="randomPasswordBtn" class="btn-secondary password-toggle" title="產生一組隨機、沒人用過的房間密碼（建立新房間用）">🎲 隨機</button>
     </div>
-    <p class="modal-note join-hint">密碼為 <b>6 個字元</b>，只能用英文大小寫或數字（大小寫不同視為不同密碼）。<br />輸入相同密碼的人會進到同一個房間、共用同一組計時器；輸入新的密碼就會建立新房間。建議不要用 123456、aaaaaa 這類太好猜的密碼。</p>
+    <p class="modal-note join-hint">密碼為 <b>6 個字元</b>，只能用英文大小寫或數字（大小寫不同視為不同密碼）。<br />輸入相同密碼的人會進到同一個房間、共用同一組計時器（每間最多 10 人）；輸入新的密碼就會建立新房間，建立的人就是隊長。建議不要用 123456、aaaaaa 這類太好猜的密碼。</p>
 
     <div id="nicknameError" class="nickname-error hidden"></div>
     <div class="modal-buttons">
