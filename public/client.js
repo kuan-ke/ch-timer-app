@@ -87,6 +87,8 @@ function nicknameForRoom(pw) {
 }
 
 let amCaptain = false; // 自己是不是目前房間的隊長
+let captainMutedList = []; // （隊長才會收到）被隊長禁止操作的隊員暱稱
+let roomCaptainName = null; // 這間房間的隊長暱稱（隊長不在房間時也會顯示）
 
 function initNickname() {
   const savedName = storageGet(NICKNAME_KEY);
@@ -200,6 +202,7 @@ function updateNicknameDisplay() {
 }
 
 function updateRoomDisplay() {
+  renderCaptainInfo();
   if (joined && myRoomPassword) {
     roomDisplay.classList.remove('hidden');
     switchRoomBtn.classList.remove('hidden');
@@ -227,6 +230,7 @@ socket.on('join:ack', ({ nickname, created, captain }) => {
   myNickname = nickname;
   joined = true;
   amCaptain = !!captain;
+  if (!amCaptain) captainMutedList = [];
   if (!(myRoomPassword && roomNicks[myRoomPassword] === nickname)) {
     // 用的是一般暱稱（或剛重新輸入了新暱稱）：記成之後所有房間預設的暱稱
     storageSet(NICKNAME_KEY, nickname);
@@ -317,11 +321,23 @@ function renderOnlineUsersBar() {
   onlineNamesEl.innerHTML = '';
   onlineUsers.forEach((u, i) => {
     if (i > 0) onlineNamesEl.appendChild(document.createTextNode('、'));
+    const isMutedByMe = amCaptain && captainMutedList.some((n) => n.toLowerCase() === u.name.toLowerCase());
     const span = document.createElement('span');
-    span.className = 'online-name';
-    span.textContent = u.name + (u.captain ? ' 👑' : '');
+    span.className = 'online-name' + (isMutedByMe ? ' muted' : '');
+    span.textContent = u.name + (u.captain ? ' 👑' : '') + (isMutedByMe ? '（已禁止）' : '');
     if (u.captain) span.title = '隊長';
     onlineNamesEl.appendChild(span);
+    if (amCaptain && !u.captain) {
+      const muteBtn = document.createElement('button');
+      muteBtn.className = 'rename-btn';
+      muteBtn.textContent = isMutedByMe ? '✅' : '🚫';
+      muteBtn.title = isMutedByMe ? `解除「${u.name}」的操作禁止` : `禁止「${u.name}」操作（點 CH、擊殺、回報時間、編輯分頁）`;
+      muteBtn.addEventListener('click', () => {
+        if (isMutedByMe) socket.emit('captainUnmute', { nickname: u.name });
+        else if (confirm(`確定要禁止「${u.name}」在這間房間進行任何操作嗎？`)) socket.emit('captainMute', { nickname: u.name });
+      });
+      onlineNamesEl.appendChild(muteBtn);
+    }
     if (amCaptain) {
       const btn = document.createElement('button');
       btn.className = 'rename-btn';
@@ -336,6 +352,47 @@ function renderOnlineUsersBar() {
       onlineNamesEl.appendChild(btn);
     }
   });
+
+  // 隊長：已禁止、但目前不在線上的隊員，也可以在這裡解除
+  if (amCaptain) {
+    const offline = captainMutedList.filter((n) => !onlineUsers.some((u) => u.name.toLowerCase() === n.toLowerCase()));
+    if (offline.length) {
+      onlineNamesEl.appendChild(document.createTextNode('　｜🚫 已禁止（離線）：'));
+      offline.forEach((n, i) => {
+        if (i > 0) onlineNamesEl.appendChild(document.createTextNode('、'));
+        const span = document.createElement('span');
+        span.className = 'online-name muted';
+        span.textContent = n;
+        onlineNamesEl.appendChild(span);
+        const b = document.createElement('button');
+        b.className = 'rename-btn';
+        b.textContent = '✅';
+        b.title = `解除「${n}」的操作禁止`;
+        b.addEventListener('click', () => socket.emit('captainUnmute', { nickname: n }));
+        onlineNamesEl.appendChild(b);
+      });
+    }
+  }
+}
+
+socket.on('captain:muted', (list) => {
+  captainMutedList = list || [];
+  renderOnlineUsersBar();
+});
+
+// 「此房間隊長為：XXX」— 隊長不在房間時也會一直顯示
+socket.on('room:info', ({ captainName }) => {
+  roomCaptainName = captainName || null;
+  renderCaptainInfo();
+});
+function renderCaptainInfo() {
+  const captainInfoEl = document.getElementById('captainInfo');
+  if (joined && roomCaptainName) {
+    captainInfoEl.textContent = `👑 此房間隊長為：${roomCaptainName}`;
+    captainInfoEl.classList.remove('hidden');
+  } else {
+    captainInfoEl.classList.add('hidden');
+  }
 }
 
 // ---------- Socket connection status ----------
@@ -371,15 +428,23 @@ function handleState(data) {
   renderStatusPanel();
 }
 
-socket.on('channelAlert', ({ tabId, channelIndex }) => {
+// 提醒：進入重生區間（較低的「噹」一聲）、進入出現中（較高的「噹」兩聲）
+socket.on('channelAlert', ({ tabId, channelIndex, kind }) => {
   if (tabId === currentTabId) {
-    const btn = gridEl.querySelector(`[data-idx="${channelIndex}"]`);
-    if (btn) {
-      btn.classList.add('flash');
-      setTimeout(() => btn.classList.remove('flash'), 3000);
-    }
+    getActiveGridTargets().forEach((target) => {
+      const btn = target.querySelector(`[data-idx="${channelIndex}"]`);
+      if (btn) {
+        btn.classList.add('flash');
+        setTimeout(() => btn.classList.remove('flash'), 3000);
+      }
+    });
   }
-  playBeep();
+  if (kind === 'window') {
+    playBeep(660);
+  } else {
+    playBeep(880);
+    setTimeout(() => playBeep(880), 400);
+  }
 });
 
 // ---------- Activity log (persistent) ----------
@@ -460,7 +525,16 @@ function renderTabs() {
 }
 
 // compact = true：子母畫面用，只顯示王的圖示（沒有圖片的分頁才退回顯示文字），不顯示鎖頭/刪除鈕，節省橫向空間
+function imageUrl(file) {
+  return new URL(`images/${file}`, window.location.href).href;
+}
+
 function renderTabsInto(target, compact) {
+  // 分頁沒變（同樣的王、名稱、目前選的那隻）就不重畫，避免圖示重新載入而閃爍
+  const sig = (compact ? 'c' : 'n') + '|' + currentTabId + '|' + tabs.length + '|' +
+    tabs.map((t) => [t.id, t.name, t.image, t.locked ? 1 : 0].join(',')).join(';');
+  if (target.dataset.sig === sig) return;
+  target.dataset.sig = sig;
   target.innerHTML = '';
   tabs.forEach((tab) => {
     const el = document.createElement('div');
@@ -468,8 +542,8 @@ function renderTabsInto(target, compact) {
     el.title = tab.name;
 
     if (tab.image) {
-      const img = document.createElement('img');
-      img.src = `images/${tab.image}`;
+      const img = target.ownerDocument.createElement('img');
+      img.src = imageUrl(tab.image);
       img.className = 'tab-thumb';
       img.alt = tab.name;
       el.appendChild(img);
@@ -657,7 +731,7 @@ function updateGridDisplay() {
       const spawnEl = btn.querySelector('.ch-spawn');
       const whoEl = btn.querySelector('.ch-who');
 
-      btn.classList.remove('counting', 'appearing');
+      btn.classList.remove('counting', 'window', 'appearing');
 
       if (ch.state === 'idle' || ch.startTime === null) {
         timerEl.textContent = '';
@@ -676,6 +750,9 @@ function updateGridDisplay() {
       if (ch.state === 'counting') {
         btn.classList.add('counting');
         timerEl.textContent = formatMs(Math.max(0, minMs - elapsed));
+      } else if (ch.state === 'window') {
+        btn.classList.add('window');
+        timerEl.textContent = formatMs(Math.max(0, maxMs - elapsed)); // 距離最大值還有多久
       } else if (ch.state === 'appearing') {
         btn.classList.add('appearing');
         timerEl.textContent = appearingText(maxMs, elapsed);
@@ -713,6 +790,7 @@ function renderStatusPanel() {
   const now = Date.now() + clockOffset;
   const showAll = activeView === 'all';
   const countingRows = [];
+  const windowRows = [];
   const appearingRows = [];
 
   tabs.forEach((tab) => {
@@ -736,6 +814,8 @@ function renderStatusPanel() {
       if (ch.state === 'counting') {
         const remainingMs = Math.max(0, minMs - elapsed);
         countingRows.push({ ...base, remainingMs, timeText: formatMs(remainingMs), soon: remainingMs <= SOON_THRESHOLD_MS });
+      } else if (ch.state === 'window') {
+        windowRows.push({ ...base, timeText: formatMs(Math.max(0, maxMs - elapsed)), inWindow: true });
       } else if (ch.state === 'appearing') {
         appearingRows.push({ ...base, timeText: appearingText(maxMs, elapsed), overdue: elapsed >= maxMs });
       }
@@ -744,18 +824,36 @@ function renderStatusPanel() {
 
   // 倒數中：最接近變成出現中的排最上面；出現中：最早變成出現中的排最上面
   countingRows.sort((a, b) => a.remainingMs - b.remainingMs);
+  windowRows.sort((a, b) => a.spawnAt - b.spawnAt);
   appearingRows.sort((a, b) => a.spawnAt - b.spawnAt);
+  // 出現中欄位：先列「出現中」（超過最大值），再列「重生區間」（綠色）
+  const appearColumnRows = appearingRows.concat(windowRows);
 
   const emptyC = showAll ? '目前沒有倒數中的 CH' : '這隻王目前沒有倒數中的 CH';
   const emptyA = showAll ? '目前沒有出現中的 CH' : '這隻王目前沒有出現中的 CH';
   renderStatusColumn(statusListCountingEl, countingRows, emptyC, showAll);
-  renderStatusColumn(statusListAppearingEl, appearingRows, emptyA, showAll);
+  renderStatusColumn(statusListAppearingEl, appearColumnRows, emptyA, showAll);
   if (pipStatusCountingEl) renderStatusColumn(pipStatusCountingEl, countingRows, emptyC, showAll);
-  if (pipStatusAppearingEl) renderStatusColumn(pipStatusAppearingEl, appearingRows, emptyA, showAll);
+  if (pipStatusAppearingEl) renderStatusColumn(pipStatusAppearingEl, appearColumnRows, emptyA, showAll);
+}
+
+// 列表內容（哪些 CH、顏色、王名、暱稱…）沒變時，只更新每一列的時間文字，不重建整個列表；
+// 這樣王的小圖示不會每秒被重新建立（不會閃爍），內容真的變動時才整個重畫。
+function statusSignature(rows, showTabName, emptyText) {
+  return (showTabName ? 'A' : 'B') + '|' + emptyText + '|' + rows.map((r) =>
+    [r.tabId, r.channelIndex, r.who, r.spawnAt, r.tabImage, r.tabName, r.soon ? 1 : 0, r.inWindow ? 1 : 0, r.overdue ? 1 : 0].join(',')
+  ).join(';');
 }
 
 function renderStatusColumn(container, rows, emptyText, showTabName) {
   const doc = container.ownerDocument;
+  const sig = statusSignature(rows, showTabName, emptyText);
+  if (container.dataset.sig === sig) {
+    const timeEls = container.querySelectorAll('.status-row .status-time');
+    rows.forEach((r, i) => { if (timeEls[i] && timeEls[i].textContent !== r.timeText) timeEls[i].textContent = r.timeText; });
+    return;
+  }
+  container.dataset.sig = sig;
   container.innerHTML = '';
   if (rows.length === 0) {
     const empty = doc.createElement('div');
@@ -767,13 +865,13 @@ function renderStatusColumn(container, rows, emptyText, showTabName) {
 
   rows.forEach((r) => {
     const row = doc.createElement('div');
-    row.className = 'status-row' + (r.soon ? ' soon' : '');
+    row.className = 'status-row' + (r.soon ? ' soon' : '') + (r.inWindow ? ' in-window' : '') + (r.overdue ? ' overdue-row' : '');
 
     // 王的小圖示（「本王」只顯示圖示，「總頻道」顯示圖示 + 王名）
     if (r.tabImage) {
       const thumb = doc.createElement('img');
+      thumb.src = imageUrl(r.tabImage);
       thumb.className = 'status-thumb';
-      thumb.src = new URL(`images/${r.tabImage}`, window.location.href).href;
       thumb.alt = r.tabName;
       thumb.title = r.tabName;
       row.appendChild(thumb);
@@ -1123,13 +1221,13 @@ bindViewToggle(document);
 
 // ---------- Sound alert ----------
 let audioCtx = null;
-function playBeep() {
+function playBeep(freq) {
   try {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.type = 'sine';
-    osc.frequency.value = 880;
+    osc.frequency.value = freq || 880;
     gain.gain.value = 0.045; // 原本 0.15 的 30%
     osc.connect(gain);
     gain.connect(audioCtx.destination);
