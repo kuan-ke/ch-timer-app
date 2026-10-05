@@ -282,7 +282,7 @@
     A.switchFrom = joined ? myRoomPassword : null;
     myRoomPassword = password;
     manualJoinPending = true;
-    A.socket.emit('joinRoom', { nickname: myNickname, password, clientId: myClientId });
+    A.socket.emit('joinRoom', { nickname: nicknameForRoom(password), password, clientId: myClientId });
   }
 
   function normalize(n) { return (n || '').trim().toLowerCase(); }
