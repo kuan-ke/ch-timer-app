@@ -258,8 +258,8 @@ body {
   gap: 8px;
 }
 .boss-image {
-  width: 60px;
-  height: 60px;
+  width: 72px;
+  height: 72px;
   object-fit: contain;
   image-rendering: pixelated;
   background: #0f172a;
@@ -755,3 +755,7 @@ body {
 .pip-root .status-row .status-thumb { width: 18px; height: 18px; }
 /* 子母畫面的王選單間距縮小，一排放得下 10 隻王 */
 .pip-root .tabs-list { gap: 4px; }
+
+/* 線上名單：隊長改暱稱按鈕 */
+.online-names .rename-btn { border:none; background:transparent; color:var(--text-dim); cursor:pointer; font-size:12px; padding:0 2px; margin-left:1px; }
+.online-names .rename-btn:hover { color:var(--accent); }
