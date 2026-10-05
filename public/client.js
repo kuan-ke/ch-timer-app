@@ -76,11 +76,24 @@ function storageGet(key) { try { return localStorage.getItem(key); } catch (e) {
 function storageSet(key, val) { try { localStorage.setItem(key, val); } catch (e) { /* ignore */ } }
 function storageRemove(key) { try { localStorage.removeItem(key); } catch (e) { /* ignore */ } }
 
+// 各房間專屬暱稱（隊長在某間房間幫你改的名字，只在那間房間有效）：{ 房間密碼: 暱稱 }
+const ROOM_NICKS_KEY = 'ch_timer_room_nicknames';
+let roomNicks = {};
+try { roomNicks = JSON.parse(storageGet(ROOM_NICKS_KEY) || '{}') || {}; } catch (e) { roomNicks = {}; }
+function saveRoomNicks() { storageSet(ROOM_NICKS_KEY, JSON.stringify(roomNicks)); }
+// 進某間房間要用的暱稱：有房間專屬暱稱就用它，否則用原本的暱稱
+function nicknameForRoom(pw) {
+  return (pw && roomNicks[pw]) || storageGet(NICKNAME_KEY) || myNickname;
+}
+
+let amCaptain = false; // 自己是不是目前房間的隊長
+
 function initNickname() {
   const savedName = storageGet(NICKNAME_KEY);
   const savedPw = storageGet(ROOM_KEY);
   if (savedName) myNickname = savedName;
   if (savedPw) myRoomPassword = savedPw;
+  if (savedName && savedPw) myNickname = nicknameForRoom(savedPw);
 
   if (savedName && savedPw) {
     hideNicknameOverlay(); // 連線後會自動進入原本的房間（見 socket 'connect'）
@@ -121,8 +134,9 @@ function hideNicknameOverlay() {
 }
 
 function submitNickname() {
-  const name = nicknameInput.value.trim().slice(0, 20);
   const pw = roomPasswordInput.value.trim();
+  // 暱稱已鎖定時，進房用這間房間的專屬暱稱（如果有的話）
+  const name = (nicknameInput.readOnly ? nicknameForRoom(pw) : nicknameInput.value).trim().slice(0, 20);
   if (!name) {
     nicknameInput.focus();
     return;
@@ -182,7 +196,7 @@ togglePasswordBtn.addEventListener('click', () => {
 });
 
 function updateNicknameDisplay() {
-  myNicknameDisplay.textContent = myNickname ? `您的暱稱：${myNickname}` : '';
+  myNicknameDisplay.textContent = myNickname ? `您的暱稱：${myNickname}${amCaptain && joined ? '（👑 隊長）' : ''}` : '';
 }
 
 function updateRoomDisplay() {
@@ -209,15 +223,25 @@ switchRoomBtn.addEventListener('click', () => {
   window.location.reload();
 });
 
-socket.on('join:ack', ({ nickname, created }) => {
+socket.on('join:ack', ({ nickname, created, captain }) => {
   myNickname = nickname;
   joined = true;
-  storageSet(NICKNAME_KEY, nickname);
+  amCaptain = !!captain;
+  if (!(myRoomPassword && roomNicks[myRoomPassword] === nickname)) {
+    // 用的是一般暱稱（或剛重新輸入了新暱稱）：記成之後所有房間預設的暱稱
+    storageSet(NICKNAME_KEY, nickname);
+    if (myRoomPassword && roomNicks[myRoomPassword]) { delete roomNicks[myRoomPassword]; saveRoomNicks(); }
+  }
   if (myRoomPassword) storageSet(ROOM_KEY, myRoomPassword);
+  renderOnlineUsersBar();
   updateNicknameDisplay();
   updateRoomDisplay();
   hideNicknameOverlay();
-  if (manualJoinPending) showToast(created ? '已建立新房間，把密碼分享給隊友就能一起使用' : '已進入房間');
+  if (manualJoinPending) {
+    showToast(created
+      ? (amCaptain ? '已建立新房間，你是這間房間的隊長 👑，把密碼分享給隊友就能一起使用' : '已建立新房間，把密碼分享給隊友就能一起使用')
+      : '已進入房間');
+  }
   manualJoinPending = false;
 });
 
@@ -225,8 +249,10 @@ socket.on('join:error', ({ field, code, message }) => {
   joined = false;
   manualJoinPending = false;
   updateRoomDisplay();
+  amCaptain = false;
   if (code === 'banned') {
     // 這個暱稱被移出此房間：解除暱稱鎖定，讓使用者換一個
+    if (myRoomPassword && roomNicks[myRoomPassword]) { delete roomNicks[myRoomPassword]; saveRoomNicks(); }
     storageRemove(NICKNAME_KEY);
     myNickname = null;
     updateNicknameDisplay();
@@ -239,13 +265,21 @@ socket.on('join:error', ({ field, code, message }) => {
 });
 
 // 伺服器管理者強制修改了「我」的暱稱
+// 暱稱被改了（隊長或管理者），只在這間房間有效
 socket.on('forceNickname', (name) => {
   myNickname = name;
-  storageSet(NICKNAME_KEY, name);
+  if (myRoomPassword) {
+    if (name === storageGet(NICKNAME_KEY)) delete roomNicks[myRoomPassword];
+    else roomNicks[myRoomPassword] = name;
+    saveRoomNicks();
+  }
   updateNicknameDisplay();
+  renderOnlineUsersBar();
 });
 
 socket.on('removedByAdmin', () => {
+  if (myRoomPassword && roomNicks[myRoomPassword]) { delete roomNicks[myRoomPassword]; saveRoomNicks(); }
+  amCaptain = false;
   storageRemove(NICKNAME_KEY);
   myNickname = null;
   joined = false;
@@ -277,9 +311,31 @@ socket.on('users:update', (list) => {
   renderOnlineUsersBar();
 });
 
+// 線上名單：隊長名字後面有 👑；自己是隊長時，每個名字旁邊有 ✎ 可以改暱稱（包含自己）
 function renderOnlineUsersBar() {
   onlineCountEl.textContent = onlineUsers.length;
-  onlineNamesEl.textContent = onlineUsers.map((u) => u.name).join('、');
+  onlineNamesEl.innerHTML = '';
+  onlineUsers.forEach((u, i) => {
+    if (i > 0) onlineNamesEl.appendChild(document.createTextNode('、'));
+    const span = document.createElement('span');
+    span.className = 'online-name';
+    span.textContent = u.name + (u.captain ? ' 👑' : '');
+    if (u.captain) span.title = '隊長';
+    onlineNamesEl.appendChild(span);
+    if (amCaptain) {
+      const btn = document.createElement('button');
+      btn.className = 'rename-btn';
+      btn.textContent = '✎';
+      btn.title = `修改「${u.name}」在這間房間的暱稱`;
+      btn.addEventListener('click', () => {
+        const newName = prompt(`修改「${u.name}」在這間房間的暱稱：`, u.name);
+        if (newName !== null && newName.trim() && newName.trim() !== u.name) {
+          socket.emit('captainRename', { targetSocketId: u.id, newName: newName.trim().slice(0, 20) });
+        }
+      });
+      onlineNamesEl.appendChild(btn);
+    }
+  });
 }
 
 // ---------- Socket connection status ----------
@@ -497,7 +553,7 @@ function renderRangePanel() {
   maxInput.value = tab.maxMinutes;
   minInput.disabled = !!tab.locked;
   maxInput.disabled = !!tab.locked;
-  rangeHintEl.textContent = '右鍵輸入死亡時間或中鍵輸入重生時間';
+  rangeHintEl.textContent = '右鍵輸入死亡時間 或 中鍵輸入重生時間';
 }
 
 function submitRangeChange() {
@@ -985,7 +1041,7 @@ async function openPip() {
   }
 
   pipDoc = pipWindow.document;
-  pipDoc.title = '巡王計時器';
+  pipDoc.title = '楓之谷｜團隊野王計時器';
 
   // 套用跟主頁一樣的樣式表
   const link = pipDoc.createElement('link');
