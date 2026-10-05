@@ -12,6 +12,8 @@
   --counting-bg: #2563eb;
   --counting-text: #ffffff;
   --appearing-bg: #ea580c;
+  --window-bg: #86efac;
+  --window-text: #052e16;
   --appearing-text: #ffffff;
 
   --accent: #60a5fa;
@@ -310,6 +312,7 @@ body {
 .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
 .dot.idle { background: var(--idle-bg); border: 1px solid var(--border); }
 .dot.counting { background: var(--counting-bg); }
+.dot.window { background: var(--window-bg); }
 .dot.appearing { background: var(--appearing-bg); }
 
 /* ---------- 左右兩欄主版面 ---------- */
@@ -405,6 +408,7 @@ body {
 }
 
 .ch-btn.counting { background: var(--counting-bg); color: var(--counting-text); }
+.ch-btn.window { background: var(--window-bg); color: var(--window-text); }
 .ch-btn.appearing { background: var(--appearing-bg); color: var(--appearing-text); }
 
 .ch-btn.flash { animation: flashPulse 1s ease-in-out 3; }
@@ -759,3 +763,22 @@ body {
 /* 線上名單：隊長改暱稱按鈕 */
 .online-names .rename-btn { border:none; background:transparent; color:var(--text-dim); cursor:pointer; font-size:12px; padding:0 2px; margin-left:1px; }
 .online-names .rename-btn:hover { color:var(--accent); }
+
+/* 重生區間（淺綠） */
+.status-row.in-window { background: #12331f; box-shadow: inset 0 0 0 1px #4ade80; }
+.status-row.in-window .status-time { color: #86efac; }
+/* 隊長：被禁止的隊員、隊長資訊 */
+.online-names .online-name.muted { color: #fca5a5; }
+.captain-info { font-size: 12px; color: #fde68a; background: #3a2e0a; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+
+/* 線上名單：人多或隊長按鈕多時換行顯示，不再被截斷 */
+.online-users-bar { max-width: none; overflow: visible; flex-wrap: wrap; row-gap: 2px; }
+.online-names { white-space: normal; overflow: visible; line-height: 1.6; }
+.online-names .online-name { white-space: nowrap; }
+
+/* 進行中頻道：出現中（超過最大值）的列也橘色閃爍 */
+@keyframes overdueRowBlink {
+  0%, 100% { background: #4a2a10; box-shadow: inset 0 0 0 1px #ea580c; }
+  50% { background: #7c2d12; box-shadow: inset 0 0 0 1px #fb923c; }
+}
+.status-row.overdue-row { animation: overdueRowBlink 1s ease-in-out infinite; }
